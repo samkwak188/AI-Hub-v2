@@ -1,7 +1,16 @@
 // AI Collab — Prompt Templates
 // Inspired by AI Hub's 3-round discussion system
 
-const SYSTEM_IDENTITY = `You are a highly knowledgeable AI assistant participating in a collaborative problem-solving session. Your goal is to provide accurate, thorough, and well-reasoned answers.`;
+const SYSTEM_IDENTITY = `You are a highly rigorous AI assistant in a multi-model verification workflow.
+
+Core rules:
+- Prioritize correctness over fluency.
+- Do NOT hallucinate. Never invent facts, citations, values, formulas, or context.
+- If information is missing or uncertain, say exactly what is unknown.
+- If the question is ambiguous, state the ambiguity and resolve it with explicit assumptions.
+- If screenshot attachments are provided, treat them as primary visual evidence and cross-check against extracted text.
+- Keep equations human-readable (example: A = sqrt(a^2 + b^2)); avoid raw LaTeX wrappers when possible.
+- Show concise but explicit logic for non-trivial conclusions.`;
 
 /**
  * Format conversation history into a readable string
@@ -21,117 +30,250 @@ ${historyText}
 === END OF HISTORY ===\n`;
 }
 
+/**
+ * Format screen/page context for prompts.
+ */
+function formatPageContext(context) {
+    if (!context) return '';
+
+    let contextText = `
+
+=== CURRENT SCREEN CONTEXT ===
+Title: ${context.title || 'Unknown'}
+URL: ${context.url || 'Unknown'}
+Context Type: ${context.type || 'unknown'}
+Captured At: ${context.capturedAt || 'Unknown'}
+`;
+
+    if (context.content) {
+        contextText += `
+
+Extracted Page Text:
+${context.content}`;
+    }
+
+    if (context.screenSummary) {
+        contextText += `
+
+Screenshot Analysis:
+${context.screenSummary}`;
+    } else if (context.screenshot) {
+        contextText += `
+
+Screenshot Analysis:
+(Screenshot was captured but analysis was unavailable.)`;
+    }
+
+    contextText += `
+
+=== END SCREEN CONTEXT ===
+`;
+
+    return contextText;
+}
+
+function formatPriorScreenContexts(priorContexts) {
+    if (!Array.isArray(priorContexts) || priorContexts.length === 0) return '';
+
+    const tail = priorContexts.slice(-5);
+    const blocks = tail.map((ctx, index) => {
+        let text = `
+--- PRIOR SCREEN ${index + 1} ---
+Title: ${ctx.title || 'Unknown'}
+URL: ${ctx.url || 'Unknown'}
+Context Type: ${ctx.type || 'unknown'}
+Captured At: ${ctx.capturedAt || 'Unknown'}`;
+
+        if (ctx.content) {
+            text += `
+Extracted Page Text:
+${ctx.content}`;
+        }
+
+        if (ctx.screenSummary) {
+            text += `
+Screenshot Analysis:
+${ctx.screenSummary}`;
+        } else if (ctx.screenshot) {
+            text += `
+Screenshot Analysis:
+(Screenshot was provided for this prior screen.)`;
+        }
+
+        return text;
+    }).join('\n\n');
+
+    return `
+
+=== PREVIOUSLY CAPTURED SCREENS ===
+The user captured these earlier screens in this conversation. They may or may not be relevant to the current question.
+Use them when helpful, ignore them when not relevant.
+
+${blocks}
+
+=== END PREVIOUSLY CAPTURED SCREENS ===
+`;
+}
+
+function formatResponses(sectionTitle, responses, labelSuffix = '') {
+    const body = (responses || [])
+        .map((r) => `--- ${r.model || 'Unknown'}${labelSuffix} ---\n${r.text || ''}`)
+        .join('\n\n');
+
+    return `
+${sectionTitle}
+${body || '(no responses)'}
+`;
+}
+
 const prompts = {
     /**
-     * Round 1 — Independent Answer
-     * Each model answers the question independently.
+     * Round 1 — Independent answer with strict self-checking.
      */
-    round1(userMessage, context, history) {
+    round1(userMessage, context, priorContexts, history) {
         let prompt = `${SYSTEM_IDENTITY}
 
-Answer the following question accurately and thoroughly. Be precise and cite specific facts when possible. If you're uncertain about something, clearly state your level of confidence.`;
+Role: Independent analyst (Round 1).
+Goal: Produce the most accurate answer you can from the available context, with explicit logic and no unsupported claims.
 
-        // Include conversation history for context
+Hard constraints:
+1) Do not guess hidden facts.
+2) If data is missing, say what is missing and what assumption (if any) you are using.
+3) For calculations, show exact intermediate steps and verify arithmetic.
+4) Prefer conservative claims over speculative claims.`;
+
         if (history && history.length > 0) {
             prompt += formatHistory(history);
         }
 
-        if (context) {
-            prompt += `
-
-The user is viewing the following webpage:
-Title: ${context.title || 'Unknown'}
-URL: ${context.url || 'Unknown'}
-
-Page Content:
-${context.content || '(no content extracted)'}
-
-Use this page context to inform your answer when relevant.`;
-        }
+        prompt += formatPageContext(context);
+        prompt += formatPriorScreenContexts(priorContexts);
 
         prompt += `
 
 User's current question: ${userMessage}
 
-${history && history.length > 0 ? 'Consider the conversation history above when answering. The user may be referring to something discussed earlier.' : ''}
-Provide a clear, well-structured answer.`;
+Return your answer in this structure:
+1) Direct Answer
+2) Reasoning Steps
+3) Validation Checks (logic/arithmetic/consistency)
+4) Assumptions and Uncertainty
+5) Confidence (0-100)`;
 
         return prompt;
     },
 
     /**
-     * Round 2 — Peer Critique
-     * Each model receives all Round 1 answers and critiques them.
+     * Round 2 — Deep peer cross-validation.
      */
-    round2(userMessage, allR1Responses, history) {
-        const responsesText = allR1Responses
-            .map((r, i) => `--- Response from ${r.model} ---\n${r.text}`)
-            .join('\n\n');
-
+    round2(userMessage, allR1Responses, context, priorContexts, history) {
         let prompt = `${SYSTEM_IDENTITY}
 
-You are reviewing multiple AI responses to the same question. Your job is to:
-1. Identify any factual errors or inaccuracies in the responses
-2. Note any important information that was missed
-3. Highlight areas of agreement (these are likely correct)
-4. Highlight areas of disagreement (these need closer scrutiny)
-5. Provide your own improved answer that addresses the shortcomings`;
+Role: Critical reviewer (Round 2).
+Goal: Rigorously audit all Round 1 answers and catch even subtle errors.
+
+Audit requirements:
+1) Check each claim for factual/logical/calculation errors.
+2) Identify hallucinated or unsupported statements.
+3) Mark what is definitely correct versus uncertain.
+4) Resolve contradictions using evidence from context and sound reasoning.
+5) Produce a corrected draft answer with only validated claims.`;
 
         if (history && history.length > 0) {
             prompt += formatHistory(history);
         }
 
-        prompt += `
+        prompt += formatPageContext(context);
+        prompt += formatPriorScreenContexts(priorContexts);
+        prompt += formatResponses('=== ROUND 1 ANSWERS TO AUDIT ===', allR1Responses);
 
+        prompt += `
 Original Question: ${userMessage}
 
-Here are the responses from other AI models:
-
-${responsesText}
-
-Provide your critique and an improved answer. Be specific about what was wrong and what was right.`;
+Return in this exact structure:
+1) Error Audit Per Model
+2) Confirmed Correct Points
+3) Disagreements and Resolution
+4) Corrected Draft Answer
+5) Remaining Risks / Unknowns
+6) Confidence (0-100)`;
 
         return prompt;
     },
 
     /**
-     * Round 3 — Final Synthesis
-     * One model (usually GPT-4o) synthesizes all critiques into a final answer.
+     * Round 3 — Consensus discussion.
      */
-    round3(userMessage, allR1Responses, allR2Critiques, history) {
-        const r1Text = allR1Responses
-            .map((r) => `[${r.model}]: ${r.text}`)
-            .join('\n\n');
-
-        const r2Text = allR2Critiques
-            .map((r) => `[${r.model} critique]: ${r.text}`)
-            .join('\n\n');
-
+    round3(userMessage, allR1Responses, allR2Critiques, context, priorContexts, history) {
         let prompt = `${SYSTEM_IDENTITY}
 
-You are the final synthesizer in a collaborative AI problem-solving session. Multiple AI models have independently answered a question and then critiqued each other's responses.
+Role: Consensus builder (Round 3).
+Goal: Use Round 1 + Round 2 outputs to converge on a single answer that all models can agree is defensible.
 
-Your task is to produce the FINAL, DEFINITIVE answer by:
-1. Incorporating the strongest points from all responses
-2. Resolving any disagreements by favoring the most well-supported position
-3. Correcting any errors identified in the critique round
-4. Ensuring the answer is complete, accurate, and clearly written`;
+Consensus rules:
+1) Keep only claims that survived cross-validation.
+2) Remove or rewrite any claim with unresolved uncertainty.
+3) If there are multiple plausible outcomes, clearly state conditions for each.
+4) Ensure final logic is internally consistent and context-aligned.`;
 
         if (history && history.length > 0) {
             prompt += formatHistory(history);
         }
 
-        prompt += `
+        prompt += formatPageContext(context);
+        prompt += formatPriorScreenContexts(priorContexts);
+        prompt += formatResponses('=== ROUND 1 INDEPENDENT ANSWERS ===', allR1Responses);
+        prompt += formatResponses('=== ROUND 2 CROSS-VALIDATION REPORTS ===', allR2Critiques);
 
+        prompt += `
 Original Question: ${userMessage}
 
-=== ROUND 1: Independent Answers ===
-${r1Text}
+Return in this exact structure:
+1) Consensus Candidate Answer
+2) Evidence for Consensus
+3) Rejected Claims (and why)
+4) Unresolved Issues (if any)
+5) Final Sign-off Checklist
+6) Confidence (0-100)`;
 
-=== ROUND 2: Peer Critiques ===
-${r2Text}
+        return prompt;
+    },
 
-Now produce the final, synthesized answer. This should be the best possible answer, combining the strengths of all models while fixing any identified issues. Write it as a clear, direct response to the user — do NOT reference the rounds, the other models, or the collaboration process. Just give the best answer.`;
+    /**
+     * Round 4 — Final synthesis from consensus.
+     */
+    round4(userMessage, allR1Responses, allR2Critiques, allR3Consensus, context, priorContexts, history) {
+        let prompt = `${SYSTEM_IDENTITY}
+
+Role: Final synthesizer (Round 4).
+Goal: Produce the final user-facing answer that is maximally precise, correct, and aligned with multi-model consensus.
+
+Non-negotiable rules:
+1) Include only claims that are validated by prior rounds or explicit context.
+2) If certainty is not possible, state the uncertainty clearly instead of guessing.
+3) Do a final internal consistency pass before responding.
+4) Keep wording direct and clear for a human user.`;
+
+        if (history && history.length > 0) {
+            prompt += formatHistory(history);
+        }
+
+        prompt += formatPageContext(context);
+        prompt += formatPriorScreenContexts(priorContexts);
+        prompt += formatResponses('=== ROUND 1 INDEPENDENT ANSWERS ===', allR1Responses);
+        prompt += formatResponses('=== ROUND 2 CROSS-VALIDATION REPORTS ===', allR2Critiques);
+        prompt += formatResponses('=== ROUND 3 CONSENSUS DISCUSSIONS ===', allR3Consensus);
+
+        prompt += `
+Original Question: ${userMessage}
+
+Produce only the final answer to the user.
+
+Output requirements:
+- Do NOT mention rounds or model names.
+- Be exact, concise, and complete.
+- For math/logic problems, show enough steps to verify correctness.
+- If something cannot be guaranteed from given information, state that explicitly.`;
 
         return prompt;
     }

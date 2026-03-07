@@ -27,7 +27,7 @@ console.log('');
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 // Health check
 app.get('/health', (req, res) => {
@@ -45,7 +45,7 @@ app.get('/health', (req, res) => {
 
 // Main chat endpoint with SSE streaming
 app.post('/api/chat', async (req, res) => {
-    const { message, context, history } = req.body;
+    const { message, context, priorContexts, history } = req.body;
 
     if (!message) {
         return res.status(400).json({ error: 'Message is required' });
@@ -59,7 +59,9 @@ app.post('/api/chat', async (req, res) => {
 
     // Log page context if received
     if (context) {
-        console.log(`📄 Page context received: type=${context.type}, title="${context.title}", ${context.content?.length || 0} chars`);
+        const hasScreenshot = !!context.screenshot;
+        const priorCount = Array.isArray(priorContexts) ? priorContexts.length : 0;
+        console.log(`📄 Page context received: type=${context.type}, title="${context.title}", ${context.content?.length || 0} chars, screenshot=${hasScreenshot ? 'yes' : 'no'}, priorScreens=${priorCount}`);
     }
 
     // Set up SSE
@@ -78,6 +80,7 @@ app.post('/api/chat', async (req, res) => {
         const result = await runCollaboration(
             message,
             context || null,
+            Array.isArray(priorContexts) ? priorContexts : [],
             ENV_KEYS,
             history || [],
             (round, status) => {

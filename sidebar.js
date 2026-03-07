@@ -9,9 +9,25 @@
     let messages = [];
     let isLoading = false;
     let includePageContext = false;
+    let cachedScreenContext = null;
+    let screenContextHistory = [];
     let settings = {
         serverUrl: 'http://localhost:3001'
     };
+
+    const MAX_HISTORY_MESSAGES = 12;
+    const MAX_PRIOR_CONTEXTS = 3;
+    const MAX_CURRENT_CONTEXT_TEXT_CHARS = 10000;
+    const MAX_PRIOR_CONTEXT_TEXT_CHARS = 4000;
+
+    const FOLLOW_UP_CUE_REGEX = /^(and|also|then|next|continue|what about|how about|why|how|can you explain|clarify|elaborate|in that case|for that|for this|for it)\b/i;
+    const FOLLOW_UP_REFERENCE_REGEX = /\b(it|this|that|these|those|them|they|same|above|previous|earlier)\b/i;
+    const TOPIC_STOP_WORDS = new Set([
+        'the', 'a', 'an', 'and', 'or', 'but', 'to', 'of', 'in', 'on', 'for', 'with', 'at',
+        'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'as', 'if', 'then',
+        'than', 'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will', 'about',
+        'what', 'why', 'how', 'when', 'where', 'which', 'who', 'whom', 'whose'
+    ]);
 
     // ===== DOM Elements =====
     const $ = (sel) => document.querySelector(sel);
@@ -105,57 +121,221 @@
     }
 
     // ===== Page Context =====
+    function normalizeWords(text) {
+        return (text || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .split(/\s+/)
+            .filter(Boolean);
+    }
+
+    function getTopicWords(text) {
+        return normalizeWords(text).filter(word => word.length > 2 && !TOPIC_STOP_WORDS.has(word));
+    }
+
+    function getOverlapScore(wordsA, wordsB) {
+        const setA = new Set(wordsA);
+        const setB = new Set(wordsB);
+        if (setA.size === 0 || setB.size === 0) return 0;
+
+        let overlap = 0;
+        setA.forEach(word => {
+            if (setB.has(word)) overlap += 1;
+        });
+
+        return overlap / Math.min(setA.size, setB.size);
+    }
+
+    function getLastUserQuestion() {
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            if (messages[i].role === 'user') return messages[i].content || '';
+        }
+        return '';
+    }
+
+    function isLikelyFollowUpQuestion(currentQuestion, previousQuestion) {
+        if (!currentQuestion || !previousQuestion) return false;
+
+        const current = currentQuestion.trim();
+        const currentLower = current.toLowerCase();
+        const currentWordCount = normalizeWords(current).length;
+
+        if (FOLLOW_UP_CUE_REGEX.test(currentLower)) return true;
+        if (currentWordCount <= 12 && FOLLOW_UP_REFERENCE_REGEX.test(currentLower)) return true;
+
+        const overlap = getOverlapScore(getTopicWords(current), getTopicWords(previousQuestion));
+        return overlap >= 0.35;
+    }
+
+    function getContextLabel(context) {
+        const charCount = context.content?.length || 0;
+        if (context.type === 'selection') return 'selection';
+        if (context.type === 'restricted') return 'limited text access';
+        if (context.type === 'error') return 'limited access';
+        return `${charCount} chars`;
+    }
+
+    function showContextReadyStatus(context, mode) {
+        const hasScreenshot = !!context?.screenshot;
+        const label = getContextLabel(context || {});
+
+        contextStatus.classList.remove('hidden', 'error');
+        contextStatus.classList.add('success');
+        contextStatus.textContent = hasScreenshot
+            ? `Screen context ${mode} (${label}) - ${context?.title || 'page'}`
+            : `Text context ${mode} (${label}) - ${context?.title || 'page'}`;
+    }
+
+    function getContextKey(context) {
+        if (!context) return '';
+        const title = context.title || '';
+        const url = context.url || '';
+        const capturedAt = context.capturedAt || '';
+        return `${title}|${url}|${capturedAt}`;
+    }
+
+    function addContextToHistory(context) {
+        if (!context) return;
+
+        const newKey = getContextKey(context);
+        if (!newKey) return;
+
+        const alreadyPresent = screenContextHistory.some(ctx => getContextKey(ctx) === newKey);
+        if (alreadyPresent) return;
+
+        screenContextHistory.push(context);
+        if (screenContextHistory.length > 10) {
+            screenContextHistory = screenContextHistory.slice(-10);
+        }
+    }
+
+    function mapContextForModel(context, includeScreenshot = true, maxTextChars = MAX_CURRENT_CONTEXT_TEXT_CHARS) {
+        if (!context) return null;
+
+        return {
+            title: context.title || 'Unknown',
+            url: context.url || 'Unknown',
+            type: context.type || 'screen',
+            capturedAt: context.capturedAt || new Date().toISOString(),
+            content: (context.content || '').slice(0, maxTextChars),
+            screenshot: includeScreenshot ? (context.screenshot || null) : null
+        };
+    }
+
+    function buildPriorContexts(currentContext) {
+        if (!includePageContext || screenContextHistory.length === 0) return [];
+
+        const currentKey = getContextKey(currentContext);
+        return screenContextHistory
+            .filter(ctx => getContextKey(ctx) !== currentKey)
+            .slice(-MAX_PRIOR_CONTEXTS)
+            .map(ctx => mapContextForModel(ctx, true, MAX_PRIOR_CONTEXT_TEXT_CHARS))
+            .filter(Boolean);
+    }
+
+    async function captureAndCacheScreenContext(statusText = 'Capturing screen context...') {
+        if (!includePageContext) return null;
+
+        contextStatus.textContent = statusText;
+        contextStatus.classList.remove('hidden', 'success', 'error');
+
+        const screenContext = await getScreenContext();
+        if (screenContext) {
+            cachedScreenContext = screenContext;
+            addContextToHistory(screenContext);
+            showContextReadyStatus(screenContext, 'updated');
+            return screenContext;
+        }
+
+        contextStatus.textContent = 'Could not capture screen context';
+        contextStatus.classList.add('error');
+        return null;
+    }
+
+    async function resolveScreenContextForMessage(isFollowUp) {
+        if (!includePageContext) return null;
+
+        if (!isFollowUp || !cachedScreenContext) {
+            const status = isFollowUp
+                ? 'Refreshing screen context...'
+                : 'New question detected, refreshing screen context...';
+            return captureAndCacheScreenContext(status);
+        }
+
+        showContextReadyStatus(cachedScreenContext, 'reused');
+        return cachedScreenContext;
+    }
+
     async function togglePageContext() {
         includePageContext = !includePageContext;
         btnContext.classList.toggle('active', includePageContext);
 
         if (includePageContext) {
-            // Immediately try to extract to give user feedback
-            contextStatus.textContent = '📄 Extracting page content...';
-            contextStatus.classList.remove('hidden');
-            const content = await getPageContent();
-            if (content) {
-                const charCount = content.content?.length || 0;
-                const typeLabel = content.type === 'pdf' ? 'PDF detected' :
-                    content.type === 'selection' ? 'Selection captured' :
-                        content.type === 'restricted' ? 'Restricted page' :
-                            content.type === 'error' ? 'Limited access' :
-                                `${charCount} chars extracted`;
-                contextStatus.textContent = `📄 ${typeLabel} — ${content.title || 'page'}`;
-                contextStatus.classList.add('success');
-            } else {
-                contextStatus.textContent = '⚠️ Could not access page';
-                contextStatus.classList.add('error');
-            }
+            await captureAndCacheScreenContext('Capturing screen context...');
         } else {
+            cachedScreenContext = null;
+            screenContextHistory = [];
             contextStatus.classList.add('hidden');
             contextStatus.classList.remove('success', 'error');
             contextStatus.textContent = '';
         }
     }
 
+    function sendRuntimeMessage(message) {
+        return new Promise((resolve) => {
+            if (typeof chrome === 'undefined' || !chrome.runtime) {
+                resolve(null);
+                return;
+            }
+
+            chrome.runtime.sendMessage(message, (response) => {
+                if (chrome.runtime.lastError) {
+                    console.error(`Runtime message failed (${message.type}):`, chrome.runtime.lastError);
+                    resolve(null);
+                    return;
+                }
+                resolve(response || null);
+            });
+        });
+    }
+
+    async function getScreenshot() {
+        if (!includePageContext) return null;
+        const response = await sendRuntimeMessage({ type: 'CAPTURE_SCREENSHOT' });
+        if (!response || response.error || !response.screenshot) {
+            return null;
+        }
+        return response;
+    }
+
     async function getPageContent() {
         if (!includePageContext) return null;
 
-        return new Promise((resolve) => {
-            if (typeof chrome !== 'undefined' && chrome.runtime) {
-                chrome.runtime.sendMessage({ type: 'GET_PAGE_CONTENT' }, (response) => {
-                    if (chrome.runtime.lastError) {
-                        console.error('Page context error:', chrome.runtime.lastError);
-                        resolve(null);
-                    } else if (!response) {
-                        console.error('Page context: empty response');
-                        resolve(null);
-                    } else {
-                        // Always return the response — even error types have useful info
-                        resolve(response);
-                    }
-                });
-            } else {
-                // Not running as extension (e.g., opened as file directly)
-                resolve(null);
-            }
-        });
+        const response = await sendRuntimeMessage({ type: 'GET_PAGE_CONTENT' });
+        if (!response) return null;
+
+        // Always return the response — even error types have useful info
+        return response;
+    }
+
+    async function getScreenContext() {
+        if (!includePageContext) return null;
+
+        const [pageContent, screenshot] = await Promise.all([
+            getPageContent(),
+            getScreenshot()
+        ]);
+
+        if (!pageContent && !screenshot) return null;
+
+        return {
+            title: pageContent?.title || screenshot?.title || 'Unknown',
+            url: pageContent?.url || screenshot?.url || 'Unknown',
+            type: pageContent?.type || 'screen',
+            content: pageContent?.content || '',
+            screenshot: screenshot?.screenshot || null,
+            capturedAt: new Date().toISOString()
+        };
     }
 
     // ===== Server Connection =====
@@ -191,6 +371,10 @@
     async function sendMessage() {
         const text = userInput.value.trim();
         if (!text || isLoading) return;
+        const previousUserQuestion = getLastUserQuestion();
+        const isFollowUp = includePageContext
+            ? isLikelyFollowUpQuestion(text, previousUserQuestion)
+            : true;
 
         // Hide welcome state
         if (welcomeState) {
@@ -204,8 +388,8 @@
         btnSend.disabled = true;
         isLoading = true;
 
-        // Get page context if enabled
-        const pageContext = await getPageContent();
+        // Resolve screen context strategy based on follow-up detection
+        const pageContext = await resolveScreenContextForMessage(isFollowUp);
 
         // Show thinking indicator
         const thinkingEl = showThinking();
@@ -236,11 +420,17 @@
         const body = { message };
 
         if (pageContext) {
-            body.context = pageContext;
+            body.context = mapContextForModel(pageContext, true, MAX_CURRENT_CONTEXT_TEXT_CHARS);
+            const priorContexts = buildPriorContexts(pageContext);
+            if (priorContexts.length > 0) {
+                body.priorContexts = priorContexts;
+            }
         }
 
-        // Conversation history (last 10 messages for context)
-        body.history = messages.slice(-10).map(m => ({
+        // Always include recent history so models can decide relevance.
+        // Exclude current user message because it is already in `body.message`.
+        const historySource = messages.slice(0, -1);
+        body.history = historySource.slice(-MAX_HISTORY_MESSAGES).map(m => ({
             role: m.role,
             content: m.content
         }));
@@ -364,14 +554,14 @@
     }
 
     function renderRounds(rounds) {
-        const roundNames = ['Independent Answers', 'Peer Critique', 'Final Synthesis'];
+        const roundNames = ['Independent Answers', 'Peer Cross-Validation', 'Consensus Discussion', 'Final Synthesis'];
         let html = '';
 
         rounds.forEach((round, i) => {
             html += `<div class="round-card">
         <div class="round-header">
           <span class="round-number">Round ${i + 1}</span>
-          <span class="round-title">${roundNames[i] || `Round ${i + 1}`}</span>
+          <span class="round-title">${round.name || roundNames[i] || `Round ${i + 1}`}</span>
         </div>`;
 
             if (round.responses) {
@@ -426,8 +616,9 @@
       </div>
       <div class="thinking-progress">
         <span class="progress-step active" data-round="1">R1 Independent</span>
-        <span class="progress-step" data-round="2">R2 Critique</span>
-        <span class="progress-step" data-round="3">R3 Synthesize</span>
+        <span class="progress-step" data-round="2">R2 Validate</span>
+        <span class="progress-step" data-round="3">R3 Consensus</span>
+        <span class="progress-step" data-round="4">R4 Final</span>
       </div>
     `;
         chatContainer.appendChild(el);
@@ -463,10 +654,17 @@
     // ===== Utilities =====
     function clearChat() {
         messages = [];
+        cachedScreenContext = null;
+        screenContextHistory = [];
         chatContainer.innerHTML = '';
         if (welcomeState) {
             chatContainer.appendChild(welcomeState);
             welcomeState.style.display = '';
+        }
+        if (includePageContext) {
+            contextStatus.classList.remove('hidden', 'error');
+            contextStatus.classList.add('success');
+            contextStatus.textContent = 'Screen context will refresh on your next question';
         }
         userInput.focus();
     }
@@ -475,6 +673,90 @@
         requestAnimationFrame(() => {
             chatContainer.scrollTop = chatContainer.scrollHeight;
         });
+    }
+
+    function escapeRegExp(text) {
+        return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function replaceRepeated(text, pattern, replacement) {
+        let output = text;
+        while (true) {
+            const next = output.replace(pattern, replacement);
+            if (next === output) return output;
+            output = next;
+        }
+    }
+
+    function latexExprToReadableHtml(expr) {
+        if (!expr) return '';
+
+        let out = expr.trim();
+        out = out.replace(/\\\\/g, '<br>');
+        out = out.replace(/\\left/g, '').replace(/\\right/g, '');
+        out = out.replace(/\\,/g, ' ');
+        out = out.replace(/\\;/g, ' ');
+        out = out.replace(/\\:/g, ' ');
+        out = out.replace(/\\!/g, '');
+
+        out = replaceRepeated(out, /\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, '($1)/($2)');
+        out = replaceRepeated(out, /\\sqrt\s*\{([^{}]+)\}/g, 'sqrt($1)');
+
+        out = out.replace(/\\(sin|cos|tan|cot|sec|csc)\s*\^\s*\{-1\}/gi, (_, fn) => `${fn.toLowerCase()}<sup>-1</sup>`);
+
+        const symbolMap = {
+            '\\pi': 'pi',
+            '\\phi': 'phi',
+            '\\theta': 'theta',
+            '\\alpha': 'alpha',
+            '\\beta': 'beta',
+            '\\gamma': 'gamma',
+            '\\Delta': 'Delta',
+            '\\delta': 'delta',
+            '\\omega': 'omega',
+            '\\lambda': 'lambda',
+            '\\mu': 'mu',
+            '\\sigma': 'sigma',
+            '\\pm': '±',
+            '\\times': 'x',
+            '\\cdot': '·',
+            '\\leq': '<=',
+            '\\geq': '>=',
+            '\\neq': '!=',
+            '\\approx': '~',
+            '\\to': '->',
+            '\\infty': 'infinity'
+        };
+
+        Object.entries(symbolMap).forEach(([latex, readable]) => {
+            out = out.replace(new RegExp(escapeRegExp(latex), 'g'), readable);
+        });
+
+        out = out.replace(/\^\{([^{}]+)\}/g, '<sup>$1</sup>');
+        out = out.replace(/\^([A-Za-z0-9+\-]+)/g, '<sup>$1</sup>');
+        out = out.replace(/_\{([^{}]+)\}/g, '<sub>$1</sub>');
+        out = out.replace(/_([A-Za-z0-9+\-]+)/g, '<sub>$1</sub>');
+
+        out = out.replace(/\\([{}])/g, '$1');
+        out = out.replace(/[{}]/g, '');
+        out = out.replace(/\\([A-Za-z]+)/g, '$1');
+        out = out.replace(/\s{2,}/g, ' ').trim();
+
+        return out;
+    }
+
+    function renderLatexMath(text) {
+        if (!text) return text;
+        let out = text;
+
+        // Display math: \[ ... \] and $$ ... $$
+        out = out.replace(/\\\[\s*([\s\S]*?)\s*\\\]/g, (_, expr) => `<span class="math-block">${latexExprToReadableHtml(expr)}</span>`);
+        out = out.replace(/\$\$\s*([\s\S]*?)\s*\$\$/g, (_, expr) => `<span class="math-block">${latexExprToReadableHtml(expr)}</span>`);
+
+        // Inline math: \( ... \)
+        out = out.replace(/\\\(\s*([\s\S]*?)\s*\\\)/g, (_, expr) => `<span class="math-inline">${latexExprToReadableHtml(expr)}</span>`);
+
+        return out;
     }
 
     function formatMarkdown(text) {
@@ -486,13 +768,24 @@
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
 
+        // Store code blocks/inline code as tokens so math conversion skips them
+        const codeTokens = [];
+        const pushCodeToken = (value) => {
+            const token = `@@CODE_TOKEN_${codeTokens.length}@@`;
+            codeTokens.push({ token, value });
+            return token;
+        };
+
         // Code blocks
         html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-            return `<pre><code class="language-${lang}">${code.trim()}</code></pre>`;
+            return pushCodeToken(`<pre><code class="language-${lang}">${code.trim()}</code></pre>`);
         });
 
         // Inline code
-        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/`([^`]+)`/g, (_, code) => pushCodeToken(`<code>${code}</code>`));
+
+        // LaTeX-like math to readable math
+        html = renderLatexMath(html);
 
         // Bold
         html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -532,6 +825,11 @@
 
         html = html.replace(/<p><\/p>/g, '');
 
+        // Restore code tokens
+        codeTokens.forEach(({ token, value }) => {
+            html = html.replace(token, value);
+        });
+
         return html;
     }
 
@@ -545,3 +843,4 @@
     // ===== Start =====
     init();
 })();
+

@@ -539,6 +539,7 @@ body {
 .thinking-progress {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .progress-step {
@@ -1029,6 +1030,39 @@ textarea::placeholder {
   margin: 8px 0;
   color: var(--text-secondary);
   font-style: italic;
+}
+
+.message-bubble .math-inline {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f8f8ff;
+  font-family: 'Cambria Math', 'Times New Roman', serif;
+  white-space: nowrap;
+}
+
+.message-bubble .math-block {
+  display: block;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  border-left: 3px solid #8B5CF6;
+  color: #f8f8ff;
+  font-family: 'Cambria Math', 'Times New Roman', serif;
+  overflow-x: auto;
+  line-height: 1.7;
+}
+
+.message-bubble .math-inline sup,
+.message-bubble .math-inline sub,
+.message-bubble .math-block sup,
+.message-bubble .math-block sub {
+  font-size: 0.78em;
 }
 
 .message-bubble table {
