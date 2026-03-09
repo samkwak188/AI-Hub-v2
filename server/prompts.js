@@ -1,282 +1,253 @@
-// AI Collab — Prompt Templates
-// Inspired by AI Hub's 3-round discussion system
+const MAX_HISTORY_CHARS = 12000;
+const MAX_CONTEXT_CHARS = 7000;
+const MAX_PRIOR_CONTEXTS = 6;
+const MAX_PRIOR_CONTEXT_CHARS = 2200;
+const MAX_CARD_STEPS = 4;
+const MAX_CARD_EVIDENCE = 6;
+const MAX_CARD_UNCERTAINTY = 3;
 
-const SYSTEM_IDENTITY = `You are a highly rigorous AI assistant in a multi-model verification workflow.
+const CORE_SYSTEM = [
+    'You are a model inside AI Collab, a multi-model verification pipeline.',
+    'Use only evidence from the prompt, chat history, page text, screenshots, and visual packets.',
+    'Prefer exact answers, exact symbols, and exact numeric values with units when available.',
+    'Do not invent missing graph values or hidden page content.',
+    'For graph, table, and diagram tasks, ground reasoning in VISUAL_PACKET_JSON.spatial, element_inventory, equations, and chart_table_analysis before doing math.',
+    'Treat chart_table_analysis.flags and uncertainty as mandatory validation targets, not optional notes.',
+    'Keep outputs compact, concrete, and solver-friendly.',
+    'If evidence is insufficient, say so plainly and mark uncertainty.',
+    'When answering math, use standard symbols such as π rather than spelling them out.'
+].join('\n');
 
-Core rules:
-- Prioritize correctness over fluency.
-- Do NOT hallucinate. Never invent facts, citations, values, formulas, or context.
-- If information is missing or uncertain, say exactly what is unknown.
-- If the question is ambiguous, state the ambiguity and resolve it with explicit assumptions.
-- If screenshot attachments are provided, treat them as primary visual evidence and cross-check against extracted text.
-- Keep equations human-readable (example: A = sqrt(a^2 + b^2)); avoid raw LaTeX wrappers when possible.
-- Show concise but explicit logic for non-trivial conclusions.`;
+const CARD_SCHEMA_TEXT = `Return exactly one JSON object with this schema:
+{
+  "answer": "short direct answer",
+  "key_steps": ["<= ${MAX_CARD_STEPS} compact bullets"],
+  "evidence_refs": ["<= ${MAX_CARD_EVIDENCE} refs such as current:text, current:packet:chart:c1, prior:2:text, history:4"],
+  "uncertainty": ["<= ${MAX_CARD_UNCERTAINTY} compact risks or missing evidence"],
+  "confidence": 0,
+  "needs_escalation": false,
+  "follow_up_classification": "related|new_question"
+}`;
 
-/**
- * Format conversation history into a readable string
- */
-function formatHistory(history) {
-    if (!history || history.length === 0) return '';
-
-    const historyText = history
-        .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
-        .join('\n\n');
-
-    return `\n\n=== CONVERSATION HISTORY ===
-The following is the previous conversation between the user and the AI assistant. Use this context to understand follow-up questions and maintain continuity.
-
-${historyText}
-
-=== END OF HISTORY ===\n`;
+function trimBlock(text, limit) {
+    return String(text || '').trim().slice(0, limit);
 }
 
-/**
- * Format screen/page context for prompts.
- */
-function formatPageContext(context) {
-    if (!context) return '';
+function formatHistory(history = []) {
+    if (!Array.isArray(history) || history.length === 0) return 'none';
 
-    let contextText = `
+    const lines = history.map((item, index) => {
+        const role = item?.role === 'assistant' ? 'assistant' : 'user';
+        const content = trimBlock(item?.content || '', 1200).replace(/\s+/g, ' ');
+        return `${index + 1}. ${role}: ${content}`;
+    }).join('\n');
 
-=== CURRENT SCREEN CONTEXT ===
-Title: ${context.title || 'Unknown'}
-URL: ${context.url || 'Unknown'}
-Context Type: ${context.type || 'unknown'}
-Captured At: ${context.capturedAt || 'Unknown'}
-`;
+    return trimBlock(lines, MAX_HISTORY_CHARS) || 'none';
+}
 
-    if (context.content) {
-        contextText += `
+function formatFocus(focus) {
+    if (!focus || typeof focus !== 'object') return 'none';
+    const top = Number.isFinite(Number(focus.top)) ? Number(focus.top) : 0;
+    const height = Number.isFinite(Number(focus.height)) ? Number(focus.height) : 0;
+    const score = Number.isFinite(Number(focus.score)) ? Number(focus.score).toFixed(2) : 'n/a';
+    const source = focus.source || 'unknown';
+    return `source=${source}; top=${top}; height=${height}; score=${score}`;
+}
 
-Extracted Page Text:
-${context.content}`;
-    }
+function formatContext(context) {
+    if (!context) return 'none';
+
+    const parts = [
+        `title: ${context.title || 'Unknown'}`,
+        `url: ${context.url || 'Unknown'}`,
+        `type: ${context.type || 'page'}`,
+        `captured_at: ${context.capturedAt || 'unknown'}`,
+        `focus: ${formatFocus(context.focus)}`,
+        'page_text:',
+        trimBlock(context.content || 'none', MAX_CONTEXT_CHARS) || 'none'
+    ];
 
     if (context.screenSummary) {
-        contextText += `
-
-Screenshot Analysis:
-${context.screenSummary}`;
-    } else if (context.screenshot) {
-        contextText += `
-
-Screenshot Analysis:
-(Screenshot was captured but analysis was unavailable.)`;
+        parts.push('visual_packet:');
+        parts.push(trimBlock(context.screenSummary, MAX_CONTEXT_CHARS));
     }
 
-    contextText += `
-
-=== END SCREEN CONTEXT ===
-`;
-
-    return contextText;
+    return parts.join('\n');
 }
 
-function formatPriorScreenContexts(priorContexts) {
-    if (!Array.isArray(priorContexts) || priorContexts.length === 0) return '';
+function formatPriorContexts(priorContexts = []) {
+    if (!Array.isArray(priorContexts) || priorContexts.length === 0) return 'none';
 
-    const tail = priorContexts.slice(-5);
-    const blocks = tail.map((ctx, index) => {
-        let text = `
---- PRIOR SCREEN ${index + 1} ---
-Title: ${ctx.title || 'Unknown'}
-URL: ${ctx.url || 'Unknown'}
-Context Type: ${ctx.type || 'unknown'}
-Captured At: ${ctx.capturedAt || 'Unknown'}`;
+    return priorContexts
+        .slice(-MAX_PRIOR_CONTEXTS)
+        .map((ctx, index) => {
+            const body = [
+                `prior_index: ${index + 1}`,
+                `title: ${ctx?.title || 'Unknown'}`,
+                `url: ${ctx?.url || 'Unknown'}`,
+                `captured_at: ${ctx?.capturedAt || 'unknown'}`,
+                `focus: ${formatFocus(ctx?.focus)}`,
+                'page_text:',
+                trimBlock(ctx?.content || 'none', MAX_PRIOR_CONTEXT_CHARS) || 'none'
+            ];
 
-        if (ctx.content) {
-            text += `
-Extracted Page Text:
-${ctx.content}`;
-        }
+            if (ctx?.screenSummary) {
+                body.push('visual_packet:');
+                body.push(trimBlock(ctx.screenSummary, MAX_PRIOR_CONTEXT_CHARS));
+            }
 
-        if (ctx.screenSummary) {
-            text += `
-Screenshot Analysis:
-${ctx.screenSummary}`;
-        } else if (ctx.screenshot) {
-            text += `
-Screenshot Analysis:
-(Screenshot was provided for this prior screen.)`;
-        }
-
-        return text;
-    }).join('\n\n');
-
-    return `
-
-=== PREVIOUSLY CAPTURED SCREENS ===
-The user captured these earlier screens in this conversation. They may or may not be relevant to the current question.
-Use them when helpful, ignore them when not relevant.
-
-${blocks}
-
-=== END PREVIOUSLY CAPTURED SCREENS ===
-`;
+            return body.join('\n');
+        })
+        .join('\n\n---\n\n');
 }
 
-function formatResponses(sectionTitle, responses, labelSuffix = '') {
-    const body = (responses || [])
-        .map((r) => `--- ${r.model || 'Unknown'}${labelSuffix} ---\n${r.text || ''}`)
-        .join('\n\n');
+function formatCards(cards = []) {
+    if (!Array.isArray(cards) || cards.length === 0) return 'none';
 
-    return `
-${sectionTitle}
-${body || '(no responses)'}
-`;
+    return JSON.stringify(cards.map((card) => ({
+        model: card.model,
+        stage: card.stage,
+        answer: card.answer,
+        key_steps: Array.isArray(card.key_steps) ? card.key_steps.slice(0, MAX_CARD_STEPS) : [],
+        evidence_refs: Array.isArray(card.evidence_refs) ? card.evidence_refs.slice(0, MAX_CARD_EVIDENCE) : [],
+        uncertainty: Array.isArray(card.uncertainty) ? card.uncertainty.slice(0, MAX_CARD_UNCERTAINTY) : [],
+        confidence: card.confidence,
+        needs_escalation: !!card.needs_escalation,
+        follow_up_classification: card.follow_up_classification || 'related'
+    })), null, 2);
 }
 
-const prompts = {
-    /**
-     * Round 1 — Independent answer with strict self-checking.
-     */
-    round1(userMessage, context, priorContexts, history) {
-        let prompt = `${SYSTEM_IDENTITY}
+function buildUserSections(sections) {
+    return sections.map(([title, value]) => `### ${title}\n${value}`).join('\n\n');
+}
 
-Role: Independent analyst (Round 1).
-Goal: Produce the most accurate answer you can from the available context, with explicit logic and no unsupported claims.
+function router(message, context, priorContexts, history, modelRoster = []) {
+    const roster = modelRoster.length > 0 ? modelRoster.join(', ') : 'unknown';
 
-Hard constraints:
-1) Do not guess hidden facts.
-2) If data is missing, say what is missing and what assumption (if any) you are using.
-3) For calculations, show exact intermediate steps and verify arithmetic.
-4) Prefer conservative claims over speculative claims.`;
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are the routing classifier. Minimize cost while preserving answer quality.`,
+        cacheKey: 'ai-collab-router-v1',
+        jsonMode: true,
+        maxTokens: 500,
+        temperature: 0,
+        user: buildUserSections([
+            ['Task', 'Classify the request and recommend the cheapest safe orchestration path.'],
+            ['Available Models', roster],
+            ['Return Format', `Return exactly one JSON object with keys: difficulty, visual_complexity, need_multi_model, expected_value_of_debate, recommended_path, reason, primary_focus.\nAllowed values: difficulty=easy|medium|hard; visual_complexity=none|low|medium|high; expected_value_of_debate=low|medium|high; recommended_path=single|dual|full.`],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-        if (history && history.length > 0) {
-            prompt += formatHistory(history);
-        }
+function round1(message, context, priorContexts, history, routeDecision, selectedModels = []) {
+    const modelLine = selectedModels.length > 0 ? selectedModels.join(', ') : 'unknown';
+    const routeSummary = JSON.stringify(routeDecision || {}, null, 2);
 
-        prompt += formatPageContext(context);
-        prompt += formatPriorScreenContexts(priorContexts);
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are solving the task independently. ${CARD_SCHEMA_TEXT}`,
+        cacheKey: 'ai-collab-r1-card-v1',
+        jsonMode: true,
+        maxTokens: 700,
+        temperature: 0.1,
+        user: buildUserSections([
+            ['Task', 'Produce one compact ReasoningCard. Answer independently before seeing peer cards.'],
+            ['Selected Models', modelLine],
+            ['Routing Decision', routeSummary],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-        prompt += `
+function round2(message, round1Cards, context, priorContexts, history, routeDecision) {
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are reviewing peer cards and must update your answer if peer evidence is stronger. ${CARD_SCHEMA_TEXT}`,
+        cacheKey: 'ai-collab-r2-review-v1',
+        jsonMode: true,
+        maxTokens: 700,
+        temperature: 0.1,
+        user: buildUserSections([
+            ['Task', 'Review the Round 1 cards. Keep only evidence-backed steps. If another model is more convincing, adopt that answer.'],
+            ['Routing Decision', JSON.stringify(routeDecision || {}, null, 2)],
+            ['Round 1 Cards', formatCards(round1Cards)],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-User's current question: ${userMessage}
+function round3(message, round1Cards, round2Cards, context, priorContexts, history, routeDecision) {
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are in the consensus round. Resolve disagreements using only evidence. ${CARD_SCHEMA_TEXT}`,
+        cacheKey: 'ai-collab-r3-consensus-v1',
+        jsonMode: true,
+        maxTokens: 650,
+        temperature: 0.1,
+        user: buildUserSections([
+            ['Task', 'Produce the strongest final card for consensus. Focus on conflicts that remain after review.'],
+            ['Routing Decision', JSON.stringify(routeDecision || {}, null, 2)],
+            ['Round 1 Cards', formatCards(round1Cards)],
+            ['Round 2 Cards', formatCards(round2Cards)],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-Return your answer in this structure:
-1) Direct Answer
-2) Reasoning Steps
-3) Validation Checks (logic/arithmetic/consistency)
-4) Assumptions and Uncertainty
-5) Confidence (0-100)`;
+function singleFinal(message, primaryCard, context, priorContexts, history, routeDecision) {
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are the final answer writer. Use the provided card and evidence to answer the user directly.`,
+        cacheKey: 'ai-collab-single-final-v1',
+        jsonMode: false,
+        maxTokens: 700,
+        temperature: 0.1,
+        user: buildUserSections([
+            ['Task', 'Write the final answer for the user. Start with the direct answer. Keep explanation short and concrete. Mention uncertainty only if it affects correctness.'],
+            ['Routing Decision', JSON.stringify(routeDecision || {}, null, 2)],
+            ['Primary Card', formatCards([primaryCard])],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-        return prompt;
-    },
+function round4(message, round1Cards, round2Cards, round3Cards, context, priorContexts, history, routeDecision) {
+    return {
+        system: `${CORE_SYSTEM}\n\nYou are the final synthesizer. Produce one user-facing answer from the structured cards only.`,
+        cacheKey: 'ai-collab-r4-synthesis-v1',
+        jsonMode: false,
+        maxTokens: 900,
+        temperature: 0.1,
+        user: buildUserSections([
+            ['Task', 'Write the final answer for the user. Start with the answer itself, then include the shortest evidence-backed explanation needed for confidence. If the cards disagree materially, say what remains uncertain instead of fabricating certainty.'],
+            ['Routing Decision', JSON.stringify(routeDecision || {}, null, 2)],
+            ['Round 1 Cards', formatCards(round1Cards)],
+            ['Round 2 Cards', formatCards(round2Cards)],
+            ['Consensus Cards', formatCards(round3Cards)],
+            ['User Message', trimBlock(message, 4000)],
+            ['Current Page Context', formatContext(context)],
+            ['Prior Page Contexts', formatPriorContexts(priorContexts)],
+            ['Session History', formatHistory(history)]
+        ])
+    };
+}
 
-    /**
-     * Round 2 — Deep peer cross-validation.
-     */
-    round2(userMessage, allR1Responses, context, priorContexts, history) {
-        let prompt = `${SYSTEM_IDENTITY}
-
-Role: Critical reviewer (Round 2).
-Goal: Rigorously audit all Round 1 answers and catch even subtle errors.
-
-Audit requirements:
-1) Check each claim for factual/logical/calculation errors.
-2) Identify hallucinated or unsupported statements.
-3) Mark what is definitely correct versus uncertain.
-4) Resolve contradictions using evidence from context and sound reasoning.
-5) Produce a corrected draft answer with only validated claims.`;
-
-        if (history && history.length > 0) {
-            prompt += formatHistory(history);
-        }
-
-        prompt += formatPageContext(context);
-        prompt += formatPriorScreenContexts(priorContexts);
-        prompt += formatResponses('=== ROUND 1 ANSWERS TO AUDIT ===', allR1Responses);
-
-        prompt += `
-Original Question: ${userMessage}
-
-Return in this exact structure:
-1) Error Audit Per Model
-2) Confirmed Correct Points
-3) Disagreements and Resolution
-4) Corrected Draft Answer
-5) Remaining Risks / Unknowns
-6) Confidence (0-100)`;
-
-        return prompt;
-    },
-
-    /**
-     * Round 3 — Consensus discussion.
-     */
-    round3(userMessage, allR1Responses, allR2Critiques, context, priorContexts, history) {
-        let prompt = `${SYSTEM_IDENTITY}
-
-Role: Consensus builder (Round 3).
-Goal: Use Round 1 + Round 2 outputs to converge on a single answer that all models can agree is defensible.
-
-Consensus rules:
-1) Keep only claims that survived cross-validation.
-2) Remove or rewrite any claim with unresolved uncertainty.
-3) If there are multiple plausible outcomes, clearly state conditions for each.
-4) Ensure final logic is internally consistent and context-aligned.`;
-
-        if (history && history.length > 0) {
-            prompt += formatHistory(history);
-        }
-
-        prompt += formatPageContext(context);
-        prompt += formatPriorScreenContexts(priorContexts);
-        prompt += formatResponses('=== ROUND 1 INDEPENDENT ANSWERS ===', allR1Responses);
-        prompt += formatResponses('=== ROUND 2 CROSS-VALIDATION REPORTS ===', allR2Critiques);
-
-        prompt += `
-Original Question: ${userMessage}
-
-Return in this exact structure:
-1) Consensus Candidate Answer
-2) Evidence for Consensus
-3) Rejected Claims (and why)
-4) Unresolved Issues (if any)
-5) Final Sign-off Checklist
-6) Confidence (0-100)`;
-
-        return prompt;
-    },
-
-    /**
-     * Round 4 — Final synthesis from consensus.
-     */
-    round4(userMessage, allR1Responses, allR2Critiques, allR3Consensus, context, priorContexts, history) {
-        let prompt = `${SYSTEM_IDENTITY}
-
-Role: Final synthesizer (Round 4).
-Goal: Produce the final user-facing answer that is maximally precise, correct, and aligned with multi-model consensus.
-
-Non-negotiable rules:
-1) Include only claims that are validated by prior rounds or explicit context.
-2) If certainty is not possible, state the uncertainty clearly instead of guessing.
-3) Do a final internal consistency pass before responding.
-4) Keep wording direct and clear for a human user.`;
-
-        if (history && history.length > 0) {
-            prompt += formatHistory(history);
-        }
-
-        prompt += formatPageContext(context);
-        prompt += formatPriorScreenContexts(priorContexts);
-        prompt += formatResponses('=== ROUND 1 INDEPENDENT ANSWERS ===', allR1Responses);
-        prompt += formatResponses('=== ROUND 2 CROSS-VALIDATION REPORTS ===', allR2Critiques);
-        prompt += formatResponses('=== ROUND 3 CONSENSUS DISCUSSIONS ===', allR3Consensus);
-
-        prompt += `
-Original Question: ${userMessage}
-
-Produce only the final answer to the user.
-
-Output requirements:
-- Do NOT mention rounds or model names.
-- Be exact, concise, and complete.
-- For math/logic problems, show enough steps to verify correctness.
-- If something cannot be guaranteed from given information, state that explicitly.`;
-
-        return prompt;
-    }
+module.exports = {
+    router,
+    round1,
+    round2,
+    round3,
+    round4,
+    singleFinal
 };
-
-module.exports = prompts;
