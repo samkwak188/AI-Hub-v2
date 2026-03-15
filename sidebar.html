@@ -88,7 +88,6 @@
         <span class="model-badge gpt">GPT-4o</span>
         <span class="model-badge cloudflare">Mistral 24B</span>
         <span class="model-badge cloudflare">Gemma 12B</span>
-        <span class="model-badge cloudflare">DeepSeek R1</span>
       </div>
     </div>
     <!-- Messages will be inserted here -->
@@ -107,6 +106,35 @@
           <polyline points="10 9 9 9 8 9" />
         </svg>
         <span>Screen</span>
+      </button>
+      <button id="btnAgentMode" class="context-btn agent" title="Allow AI to detect question regions and capture targeted screenshots">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="14" rx="2" />
+          <path d="M8 21h8" />
+          <path d="M12 17v4" />
+          <circle cx="8.5" cy="10" r="1" />
+          <circle cx="12" cy="10" r="1" />
+          <circle cx="15.5" cy="10" r="1" />
+        </svg>
+        <span>Agent Off</span>
+      </button>
+      <button id="btnVisionPacket" class="context-btn vision-packet" title="Enable OpenAI vision packet parsing">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 3h6v2h-1v2.1a7 7 0 1 1-4 0V5H9z" />
+          <path d="M9.5 17a3.5 3.5 0 0 1 5 0" />
+          <circle cx="12" cy="12" r="1.5" />
+        </svg>
+        <span>Vision Packet</span>
+      </button>
+      <button id="btnCostMode" class="context-btn" title="Enable adaptive routing and early exits to reduce API cost">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1v22" />
+          <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14.5a3.5 3.5 0 0 1 0 7H6" />
+        </svg>
+        <span>Cost On</span>
       </button>
     </div>
     <div class="input-row">
@@ -154,11 +182,13 @@
 
         <div class="settings-section">
           <h3>Active Models</h3>
-          <p class="settings-hint">API keys are configured server-side in <code>server/.env</code></p>
+          <p class="settings-hint">Models are configured server-side in
+            <code>server/.env</code>. Use the <strong>Vision Packet</strong> button near the chat box to toggle
+            OpenAI visual parsing per request. Use <strong>Cost</strong> to enable adaptive routing + early exits. Use <strong>Agent</strong> for autonomous question-region detection + targeted screenshot scan.</p>
           <div class="model-list">
             <div class="model-item">
               <span class="model-dot gpt"></span>
-              <span>GPT-4o <span style="color:#5a5a6e">— OpenAI (your key)</span></span>
+              <span>GPT-4o <span style="color:#5a5a6e">— OpenAI</span></span>
             </div>
             <div class="model-item">
               <span class="model-dot cloudflare"></span>
@@ -169,8 +199,8 @@
               <span>Gemma 3 12B <span style="color:#5a5a6e">— Cloudflare Workers AI</span></span>
             </div>
             <div class="model-item">
-              <span class="model-dot cloudflare"></span>
-              <span>DeepSeek R1 Distill 32B <span style="color:#5a5a6e">— Cloudflare Workers AI</span></span>
+              <span class="model-dot gpt"></span>
+              <span>GPT-4o Vision Packet (optional) <span style="color:#5a5a6e">— Structured screenshot parser</span></span>
             </div>
           </div>
         </div>

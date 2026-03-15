@@ -27,6 +27,7 @@
   --llama-color: #0ea5e9;
   --openrouter-color: #a78bfa;
   --cloudflare-color: #f6821f;
+  --claude-color: #d97706;
 
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-glass: rgba(255, 255, 255, 0.1);
@@ -244,6 +245,12 @@ body {
   border: 1px solid rgba(246, 130, 31, 0.2);
 }
 
+.model-badge.claude {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--claude-color);
+  border: 1px solid rgba(217, 119, 6, 0.24);
+}
+
 /* ===== Messages ===== */
 .message {
   display: flex;
@@ -442,6 +449,10 @@ body {
   border-left-color: var(--cloudflare-color);
 }
 
+.model-response.claude {
+  border-left-color: var(--claude-color);
+}
+
 .model-response-header {
   display: flex;
   align-items: center;
@@ -478,6 +489,10 @@ body {
 
 .model-dot.cloudflare {
   background: var(--cloudflare-color);
+}
+
+.model-dot.claude {
+  background: var(--claude-color);
 }
 
 .model-name {
@@ -580,6 +595,9 @@ body {
 }
 
 .context-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
 }
 
@@ -608,6 +626,18 @@ body {
   background: rgba(139, 92, 246, 0.12);
   border-color: rgba(139, 92, 246, 0.3);
   color: var(--accent-purple);
+}
+
+.context-btn.vision-packet.active {
+  background: rgba(16, 163, 127, 0.12);
+  border-color: rgba(16, 163, 127, 0.3);
+  color: var(--gpt-color);
+}
+
+.context-btn.agent.active {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
 }
 
 .input-row {

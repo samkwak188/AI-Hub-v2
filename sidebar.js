@@ -12,22 +12,16 @@
     let cachedScreenContext = null;
     let screenContextHistory = [];
     let settings = {
-        serverUrl: 'http://localhost:3001'
+        serverUrl: 'http://localhost:3001',
+        enableOpenAIVisionPacket: true,
+        enableCostOptimizedMode: true,
+        enableAgentMode: false
     };
+    let liveThinkingEl = null;
 
-    const MAX_HISTORY_MESSAGES = 12;
-    const MAX_PRIOR_CONTEXTS = 3;
-    const MAX_CURRENT_CONTEXT_TEXT_CHARS = 10000;
+    const MAX_PRIOR_CONTEXTS = 14;
+    const MAX_CURRENT_CONTEXT_TEXT_CHARS = 12000;
     const MAX_PRIOR_CONTEXT_TEXT_CHARS = 4000;
-
-    const FOLLOW_UP_CUE_REGEX = /^(and|also|then|next|continue|what about|how about|why|how|can you explain|clarify|elaborate|in that case|for that|for this|for it)\b/i;
-    const FOLLOW_UP_REFERENCE_REGEX = /\b(it|this|that|these|those|them|they|same|above|previous|earlier)\b/i;
-    const TOPIC_STOP_WORDS = new Set([
-        'the', 'a', 'an', 'and', 'or', 'but', 'to', 'of', 'in', 'on', 'for', 'with', 'at',
-        'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'as', 'if', 'then',
-        'than', 'do', 'does', 'did', 'can', 'could', 'should', 'would', 'will', 'about',
-        'what', 'why', 'how', 'when', 'where', 'which', 'who', 'whom', 'whose'
-    ]);
 
     // ===== DOM Elements =====
     const $ = (sel) => document.querySelector(sel);
@@ -40,6 +34,9 @@
     const btnSaveSettings = $('#btnSaveSettings');
     const btnNewChat = $('#btnNewChat');
     const btnContext = $('#btnContext');
+    const btnAgentMode = $('#btnAgentMode');
+    const btnVisionPacket = $('#btnVisionPacket');
+    const btnCostMode = $('#btnCostMode');
     const btnCheckServer = $('#btnCheckServer');
     const settingsModal = $('#settingsModal');
     const contextStatus = $('#contextStatus');
@@ -48,41 +45,134 @@
     function init() {
         loadSettings();
         bindEvents();
+        bindRuntimeListeners();
+        updateVisionPacketButtonState();
+        updateCostModeButtonState();
+        updateAgentModeButtonState();
         userInput.focus();
     }
 
     // ===== Settings =====
-    function loadSettings() {
-        if (typeof chrome !== 'undefined' && chrome.storage) {
-            chrome.storage.local.get(['aiCollab_settings'], (result) => {
-                if (result.aiCollab_settings) {
-                    settings = { ...settings, ...result.aiCollab_settings };
-                    populateSettingsForm();
-                }
-            });
-        } else {
-            const saved = localStorage.getItem('aiCollab_settings');
-            if (saved) {
-                settings = { ...settings, ...JSON.parse(saved) };
-                populateSettingsForm();
-            }
+    function parseBooleanSetting(value, fallback = true) {
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number') return value !== 0;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+            if (['false', '0', 'no', 'off'].includes(normalized)) return false;
         }
+        return fallback;
     }
 
-    function saveSettings() {
-        settings.serverUrl = $('#serverUrl').value.trim() || 'http://localhost:3001';
+    function isVisionPacketEnabled() {
+        return parseBooleanSetting(settings.enableOpenAIVisionPacket, true);
+    }
 
+    function isCostOptimizedModeEnabled() {
+        return parseBooleanSetting(settings.enableCostOptimizedMode, true);
+    }
+
+    function isAgentModeEnabled() {
+        return parseBooleanSetting(settings.enableAgentMode, false);
+    }
+
+    function persistSettings() {
         if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.set({ aiCollab_settings: settings });
         } else {
             localStorage.setItem('aiCollab_settings', JSON.stringify(settings));
         }
+    }
+
+    function loadSettings() {
+        if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.get(['aiCollab_settings'], (result) => {
+                if (result.aiCollab_settings) {
+                    settings = { ...settings, ...result.aiCollab_settings };
+                }
+                settings.enableOpenAIVisionPacket = parseBooleanSetting(settings.enableOpenAIVisionPacket, true);
+                settings.enableCostOptimizedMode = parseBooleanSetting(settings.enableCostOptimizedMode, true);
+                settings.enableAgentMode = parseBooleanSetting(settings.enableAgentMode, false);
+                populateSettingsForm();
+            });
+        } else {
+            const saved = localStorage.getItem('aiCollab_settings');
+            if (saved) {
+                settings = { ...settings, ...JSON.parse(saved) };
+            }
+            settings.enableOpenAIVisionPacket = parseBooleanSetting(settings.enableOpenAIVisionPacket, true);
+            settings.enableCostOptimizedMode = parseBooleanSetting(settings.enableCostOptimizedMode, true);
+            settings.enableAgentMode = parseBooleanSetting(settings.enableAgentMode, false);
+            populateSettingsForm();
+        }
+    }
+
+    function saveSettings() {
+        settings.serverUrl = $('#serverUrl').value.trim() || 'http://localhost:3001';
+        settings.enableOpenAIVisionPacket = parseBooleanSetting(settings.enableOpenAIVisionPacket, true);
+        settings.enableCostOptimizedMode = parseBooleanSetting(settings.enableCostOptimizedMode, true);
+        settings.enableAgentMode = parseBooleanSetting(settings.enableAgentMode, false);
+        persistSettings();
 
         settingsModal.classList.remove('open');
     }
 
     function populateSettingsForm() {
         $('#serverUrl').value = settings.serverUrl;
+        updateVisionPacketButtonState();
+        updateCostModeButtonState();
+        updateAgentModeButtonState();
+    }
+
+    function updateVisionPacketButtonState() {
+        if (!btnVisionPacket) return;
+        const enabled = isVisionPacketEnabled();
+        btnVisionPacket.classList.toggle('active', enabled);
+        const label = btnVisionPacket.querySelector('span');
+        if (label) label.textContent = enabled ? 'Vision Packet On' : 'Vision Packet Off';
+        btnVisionPacket.title = enabled
+            ? 'OpenAI vision packet is enabled'
+            : 'OpenAI vision packet is disabled';
+    }
+
+    function toggleVisionPacket() {
+        settings.enableOpenAIVisionPacket = !isVisionPacketEnabled();
+        updateVisionPacketButtonState();
+        persistSettings();
+    }
+
+    function updateCostModeButtonState() {
+        if (!btnCostMode) return;
+        const enabled = isCostOptimizedModeEnabled();
+        btnCostMode.classList.toggle('active', enabled);
+        const label = btnCostMode.querySelector('span');
+        if (label) label.textContent = enabled ? 'Cost On' : 'Cost Off';
+        btnCostMode.title = enabled
+            ? 'Adaptive routing and early exits are enabled'
+            : 'Adaptive routing and early exits are disabled';
+    }
+
+    function toggleCostMode() {
+        settings.enableCostOptimizedMode = !isCostOptimizedModeEnabled();
+        updateCostModeButtonState();
+        persistSettings();
+    }
+
+    function updateAgentModeButtonState() {
+        if (!btnAgentMode) return;
+        const enabled = isAgentModeEnabled();
+        btnAgentMode.classList.toggle('active', enabled);
+        const label = btnAgentMode.querySelector('span');
+        if (label) label.textContent = enabled ? 'Agent On' : 'Agent Off';
+        btnAgentMode.title = enabled
+            ? 'Agent mode enabled: AI detects question regions, scrolls to them, and captures targeted screenshots'
+            : 'Agent mode disabled';
+    }
+
+    function toggleAgentMode() {
+        settings.enableAgentMode = !isAgentModeEnabled();
+        updateAgentModeButtonState();
+        persistSettings();
     }
 
     // ===== Events =====
@@ -93,6 +183,9 @@
         btnSaveSettings.addEventListener('click', saveSettings);
         btnNewChat.addEventListener('click', clearChat);
         btnContext.addEventListener('click', togglePageContext);
+        if (btnAgentMode) btnAgentMode.addEventListener('click', toggleAgentMode);
+        if (btnVisionPacket) btnVisionPacket.addEventListener('click', toggleVisionPacket);
+        if (btnCostMode) btnCostMode.addEventListener('click', toggleCostMode);
         btnCheckServer.addEventListener('click', checkServerConnection);
 
         userInput.addEventListener('input', handleInputChange);
@@ -109,6 +202,19 @@
         });
     }
 
+    function bindRuntimeListeners() {
+        if (typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
+
+        chrome.runtime.onMessage.addListener((message) => {
+            if (!message || message.type !== 'AGENT_PROGRESS') return false;
+            if (liveThinkingEl && typeof message.status === 'string' && message.status.trim()) {
+                updateThinkingText(liveThinkingEl, message.status.trim());
+                scrollToBottom();
+            }
+            return false;
+        });
+    }
+
     function handleInputChange() {
         userInput.style.height = 'auto';
         userInput.style.height = Math.min(userInput.scrollHeight, 120) + 'px';
@@ -121,52 +227,6 @@
     }
 
     // ===== Page Context =====
-    function normalizeWords(text) {
-        return (text || '')
-            .toLowerCase()
-            .replace(/[^a-z0-9\s]/g, ' ')
-            .split(/\s+/)
-            .filter(Boolean);
-    }
-
-    function getTopicWords(text) {
-        return normalizeWords(text).filter(word => word.length > 2 && !TOPIC_STOP_WORDS.has(word));
-    }
-
-    function getOverlapScore(wordsA, wordsB) {
-        const setA = new Set(wordsA);
-        const setB = new Set(wordsB);
-        if (setA.size === 0 || setB.size === 0) return 0;
-
-        let overlap = 0;
-        setA.forEach(word => {
-            if (setB.has(word)) overlap += 1;
-        });
-
-        return overlap / Math.min(setA.size, setB.size);
-    }
-
-    function getLastUserQuestion() {
-        for (let i = messages.length - 1; i >= 0; i -= 1) {
-            if (messages[i].role === 'user') return messages[i].content || '';
-        }
-        return '';
-    }
-
-    function isLikelyFollowUpQuestion(currentQuestion, previousQuestion) {
-        if (!currentQuestion || !previousQuestion) return false;
-
-        const current = currentQuestion.trim();
-        const currentLower = current.toLowerCase();
-        const currentWordCount = normalizeWords(current).length;
-
-        if (FOLLOW_UP_CUE_REGEX.test(currentLower)) return true;
-        if (currentWordCount <= 12 && FOLLOW_UP_REFERENCE_REGEX.test(currentLower)) return true;
-
-        const overlap = getOverlapScore(getTopicWords(current), getTopicWords(previousQuestion));
-        return overlap >= 0.35;
-    }
-
     function getContextLabel(context) {
         const charCount = context.content?.length || 0;
         if (context.type === 'selection') return 'selection';
@@ -204,8 +264,8 @@
         if (alreadyPresent) return;
 
         screenContextHistory.push(context);
-        if (screenContextHistory.length > 10) {
-            screenContextHistory = screenContextHistory.slice(-10);
+        if (screenContextHistory.length > 18) {
+            screenContextHistory = screenContextHistory.slice(-18);
         }
     }
 
@@ -218,7 +278,8 @@
             type: context.type || 'screen',
             capturedAt: context.capturedAt || new Date().toISOString(),
             content: (context.content || '').slice(0, maxTextChars),
-            screenshot: includeScreenshot ? (context.screenshot || null) : null
+            screenshot: includeScreenshot ? (context.screenshot || null) : null,
+            focus: context.focus || null
         };
     }
 
@@ -252,18 +313,11 @@
         return null;
     }
 
-    async function resolveScreenContextForMessage(isFollowUp) {
+    async function resolveScreenContextForMessage() {
         if (!includePageContext) return null;
 
-        if (!isFollowUp || !cachedScreenContext) {
-            const status = isFollowUp
-                ? 'Refreshing screen context...'
-                : 'New question detected, refreshing screen context...';
-            return captureAndCacheScreenContext(status);
-        }
-
-        showContextReadyStatus(cachedScreenContext, 'reused');
-        return cachedScreenContext;
+        // Always capture a fresh screenshot on every message.
+        return captureAndCacheScreenContext('Capturing screen context...');
     }
 
     async function togglePageContext() {
@@ -338,6 +392,183 @@
         };
     }
 
+    function mapAgentStateToContext(pageState) {
+        if (!pageState) return null;
+        return {
+            title: pageState.title || 'Unknown',
+            url: pageState.url || 'Unknown',
+            type: pageState.type || 'page',
+            content: pageState.content || '',
+            screenshot: pageState.screenshot || null,
+            capturedAt: pageState.capturedAt || new Date().toISOString(),
+            focus: pageState.focus || null
+        };
+    }
+
+    function getHistoryPayloadForModel() {
+        // Exclude current user message because it is sent separately as `message`.
+        return messages.slice(0, -1).map(m => ({
+            role: m.role,
+            content: m.content
+        }));
+    }
+
+    async function captureFullPageContexts(maxShots = 6) {
+        const response = await sendRuntimeMessage({
+            type: 'AGENT_CAPTURE_FULL_PAGE',
+            maxShots
+        });
+
+        if (!response) {
+            return {
+                contexts: [],
+                metrics: null,
+                error: 'No response from extension background worker.'
+            };
+        }
+
+        if (response.ok === false) {
+            return {
+                contexts: [],
+                metrics: response.metrics || null,
+                error: response.error || 'Full-page capture failed in extension background worker.'
+            };
+        }
+
+        if (!Array.isArray(response.frames) || response.frames.length === 0) {
+            return {
+                contexts: [],
+                metrics: response.metrics || null,
+                error: 'Full-page capture returned no screenshot frames.'
+            };
+        }
+
+        return {
+            contexts: response.frames.map((frame) => mapAgentStateToContext(frame)).filter(Boolean),
+            metrics: response.metrics || null,
+            error: null
+        };
+    }
+
+    async function captureQuestionContexts(goal, maxShots = 6) {
+        const response = await sendRuntimeMessage({
+            type: 'AGENT_CAPTURE_QUESTIONS',
+            goal,
+            maxShots
+        });
+
+        if (!response) {
+            return {
+                contexts: [],
+                metrics: null,
+                error: 'No response from extension background worker.'
+            };
+        }
+
+        if (response.ok === false) {
+            return {
+                contexts: [],
+                metrics: response.metrics || null,
+                error: response.error || 'Question-targeted capture failed in extension background worker.'
+            };
+        }
+
+        if (!Array.isArray(response.frames)) {
+            return {
+                contexts: [],
+                metrics: response.metrics || null,
+                error: 'Question-targeted capture returned invalid frame data.'
+            };
+        }
+
+        return {
+            contexts: response.frames.map((frame) => mapAgentStateToContext(frame)).filter(Boolean),
+            metrics: response.metrics || null,
+            error: null
+        };
+    }
+
+    function updateThinkingText(el, text) {
+        if (!el) return;
+        const textEl = el.querySelector('.thinking-text');
+        if (textEl) textEl.textContent = text;
+    }
+
+    function buildAgentSurveySummary(contexts, goal) {
+        if (!Array.isArray(contexts) || contexts.length === 0) return '';
+
+        const lines = [];
+        lines.push(`Agent survey goal: ${goal}`);
+        lines.push(`Captured regions: ${contexts.length}`);
+
+        contexts.forEach((ctx, index) => {
+            const snippet = String(ctx?.content || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 280);
+            const top = Number(ctx?.focus?.top || ctx?.scroll?.y || 0);
+            lines.push(`${index + 1}. top=${top} ${snippet}`);
+        });
+
+        return lines.join('\n').slice(0, 5000);
+    }
+
+    async function runAgentMode(goal, thinkingEl) {
+        includePageContext = true;
+        btnContext.classList.add('active');
+        screenContextHistory = [];
+        cachedScreenContext = null;
+
+        updateThinkingText(thinkingEl, 'Agent detecting question blocks on the live page...');
+        const targetedCapture = await captureQuestionContexts(goal, 10);
+        let contexts = targetedCapture.contexts;
+
+        if (!contexts.length) {
+            if (targetedCapture.error) {
+                updateThinkingText(thinkingEl, `Question-targeted capture unavailable (${targetedCapture.error}). Trying full-page scan...`);
+            } else {
+                updateThinkingText(thinkingEl, 'No clear question blocks detected. Falling back to full-page scan...');
+            }
+        }
+
+        let fullPageCapture = { contexts: [], metrics: null, error: null };
+        if (!contexts.length) {
+            fullPageCapture = await captureFullPageContexts(10);
+            contexts = fullPageCapture.contexts;
+        }
+
+        if (!contexts.length) {
+            const reasonParts = [targetedCapture.error, fullPageCapture.error].filter(Boolean);
+            const reasonText = reasonParts.length > 0
+                ? ` Capture error: ${reasonParts.join(' | ')}`
+                : '';
+            throw new Error(`Agent could not capture usable page screenshots.${reasonText}`);
+        }
+
+        if (!targetedCapture.error && !targetedCapture.contexts.length && fullPageCapture.contexts.length > 0) {
+            updateThinkingText(thinkingEl, 'No clear question blocks detected. Falling back to full-page scan...');
+        }
+
+        contexts.forEach((ctx) => addContextToHistory(ctx));
+        const finalContext = contexts[contexts.length - 1];
+        const surveySummary = buildAgentSurveySummary(contexts, goal);
+        if (surveySummary) {
+            finalContext.content = `${surveySummary}\n\n${finalContext.content || ''}`.trim();
+        }
+        cachedScreenContext = finalContext;
+        showContextReadyStatus(finalContext, 'updated');
+
+        const targetedShotCount = Number(targetedCapture?.metrics?.capturedShots || 0);
+        const fullPageShotCount = Number(fullPageCapture?.metrics?.capturedShots || 0);
+        const captureLabel = targetedShotCount > 0
+            ? `question-focused capture (${targetedShotCount} shots)`
+            : (fullPageShotCount > 0
+                ? `full-page capture (${fullPageShotCount} shots)`
+                : `single-screen capture (${contexts.length} shot)`);
+        updateThinkingText(thinkingEl, `Agent finished ${captureLabel}. Running multi-model collaboration...`);
+        return callBackend(goal, finalContext, thinkingEl);
+    }
+
     // ===== Server Connection =====
     async function checkServerConnection() {
         const statusDot = $('#serverStatus .status-dot');
@@ -371,10 +602,6 @@
     async function sendMessage() {
         const text = userInput.value.trim();
         if (!text || isLoading) return;
-        const previousUserQuestion = getLastUserQuestion();
-        const isFollowUp = includePageContext
-            ? isLikelyFollowUpQuestion(text, previousUserQuestion)
-            : true;
 
         // Hide welcome state
         if (welcomeState) {
@@ -388,15 +615,20 @@
         btnSend.disabled = true;
         isLoading = true;
 
-        // Resolve screen context strategy based on follow-up detection
-        const pageContext = await resolveScreenContextForMessage(isFollowUp);
+        const agentMode = isAgentModeEnabled();
+        // In non-agent mode, capture fresh context once per message.
+        const pageContext = agentMode ? null : await resolveScreenContextForMessage();
 
         // Show thinking indicator
         const thinkingEl = showThinking();
+        liveThinkingEl = thinkingEl;
 
         try {
-            const response = await callBackend(text, pageContext, thinkingEl);
+            const response = agentMode
+                ? await runAgentMode(text, thinkingEl)
+                : await callBackend(text, pageContext, thinkingEl);
             removeThinking(thinkingEl);
+            liveThinkingEl = null;
 
             if (response.error) {
                 addErrorMessage(response.error);
@@ -405,6 +637,7 @@
             }
         } catch (err) {
             removeThinking(thinkingEl);
+            liveThinkingEl = null;
             addErrorMessage(getErrorText(err));
         }
 
@@ -417,7 +650,13 @@
     async function callBackend(message, pageContext, thinkingEl) {
         const url = `${settings.serverUrl}/api/chat`;
 
-        const body = { message };
+        const body = {
+            message,
+            options: {
+                enableOpenAIVisionPacket: isVisionPacketEnabled(),
+                enableCostOptimizedMode: isCostOptimizedModeEnabled()
+            }
+        };
 
         if (pageContext) {
             body.context = mapContextForModel(pageContext, true, MAX_CURRENT_CONTEXT_TEXT_CHARS);
@@ -427,13 +666,9 @@
             }
         }
 
-        // Always include recent history so models can decide relevance.
-        // Exclude current user message because it is already in `body.message`.
-        const historySource = messages.slice(0, -1);
-        body.history = historySource.slice(-MAX_HISTORY_MESSAGES).map(m => ({
-            role: m.role,
-            content: m.content
-        }));
+        // Include full current-session history so models decide whether the new question
+        // is a continuation or a fresh topic.
+        body.history = getHistoryPayloadForModel();
 
         const res = await fetch(url, {
             method: 'POST',
@@ -513,7 +748,8 @@
             role: 'assistant',
             content: response.finalAnswer,
             timestamp: Date.now(),
-            rounds: response.rounds
+            rounds: response.rounds,
+            meta: response.meta || null
         });
 
         const el = document.createElement('div');
@@ -538,7 +774,7 @@
 
             const details = document.createElement('div');
             details.className = 'collab-details';
-            details.innerHTML = renderRounds(response.rounds);
+            details.innerHTML = renderRounds(response.rounds, response.meta || null);
 
             toggle.addEventListener('click', () => {
                 toggle.classList.toggle('open');
@@ -553,9 +789,37 @@
         scrollToBottom();
     }
 
-    function renderRounds(rounds) {
+    function renderTelemetrySummary(meta) {
+        if (!meta) return '';
+
+        const route = meta.routeDecision || {};
+        const path = route.recommended_path || 'unknown';
+        const roundsRun = meta.rounds_run || 0;
+        const earlyExit = meta.early_exit?.triggered
+            ? `early exit: ${meta.early_exit.stage}`
+            : 'early exit: none';
+        const cost = typeof meta.totals?.estimated_cost_usd === 'number'
+            ? `$${meta.totals.estimated_cost_usd.toFixed(4)} est.`
+            : 'cost unavailable';
+        const cacheHit = typeof meta.cache_hit_rate === 'number'
+            ? `${Math.round(meta.cache_hit_rate * 100)}% cache`
+            : 'cache unavailable';
+        const models = Array.isArray(meta.selected_models) ? meta.selected_models.join(', ') : 'unknown';
+
+        return `<div class="round-card">
+        <div class="round-header">
+          <span class="round-number">Meta</span>
+          <span class="round-title">Route ${path}</span>
+        </div>
+        <div class="model-response cloudflare">
+          <div class="model-response-text"><p>Models: ${models}<br>Rounds: ${roundsRun}<br>${earlyExit}<br>${cost}<br>${cacheHit}</p></div>
+        </div>
+      </div>`;
+    }
+
+    function renderRounds(rounds, meta) {
         const roundNames = ['Independent Answers', 'Peer Cross-Validation', 'Consensus Discussion', 'Final Synthesis'];
-        let html = '';
+        let html = renderTelemetrySummary(meta);
 
         rounds.forEach((round, i) => {
             html += `<div class="round-card">
@@ -587,6 +851,7 @@
         if (!name) return 'cloudflare';
         const lower = name.toLowerCase();
         if (lower.includes('gpt')) return 'gpt';
+        if (lower.includes('claude')) return 'claude';
         if (lower.includes('gemini')) return 'gemini';
         if (lower.includes('gemma')) return 'cloudflare';
         if (lower.includes('deepseek')) return 'cloudflare';
@@ -688,6 +953,19 @@
         }
     }
 
+    function normalizePlainMathSymbols(text) {
+        if (!text) return text;
+
+        return text.split('\n').map((line) => {
+            if (!/\bpi\b/i.test(line)) return line;
+
+            const looksMathLike = /[=+\-*/^0-9()]|\b(radius|diameter|circumference|area|perimeter|volume|arc|sector|radian|angle|circle|sphere|equation|function|sin|cos|tan)\b/i.test(line);
+            if (!looksMathLike) return line;
+
+            return line.replace(/(^|[^A-Za-z])pi(?=[^A-Za-z]|$)/gi, '$1π');
+        }).join('\n');
+    }
+
     function latexExprToReadableHtml(expr) {
         if (!expr) return '';
 
@@ -705,7 +983,7 @@
         out = out.replace(/\\(sin|cos|tan|cot|sec|csc)\s*\^\s*\{-1\}/gi, (_, fn) => `${fn.toLowerCase()}<sup>-1</sup>`);
 
         const symbolMap = {
-            '\\pi': 'pi',
+            '\\pi': 'π',
             '\\phi': 'phi',
             '\\theta': 'theta',
             '\\alpha': 'alpha',
@@ -786,6 +1064,7 @@
 
         // LaTeX-like math to readable math
         html = renderLatexMath(html);
+        html = normalizePlainMathSymbols(html);
 
         // Bold
         html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -843,4 +1122,3 @@
     // ===== Start =====
     init();
 })();
-
